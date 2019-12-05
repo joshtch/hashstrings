@@ -1,0 +1,36 @@
+#
+# test file
+# for complete grammar, see https://hyperrealm.github.io/libconfig/libconfig_manual.html
+#
+# prepended to all created symbol names
+#
+prefix = "kHash"
+
+# the character mapping array
+# array starts out mapping one-to-one, i.e. input = output
+#
+mappings:
+{
+    # make the generated hashes case-insensitive
+    ignoreCase = true
+
+    # mark these characters as 'kHashSeparator'
+    Separator = " ._-"
+
+    # mark this range as 'kHashDigit'
+    Digit = "0-9"
+
+    # mark the different styles of brackets as equivalent
+    LBracket = "({["
+    RBracket = ")}]"
+}
+
+# the strings to hash into the enum
+# if there's a comma, first string is for symbol, second is to hash
+#
+keywords = [
+    "Destination",
+    "Template",
+    "SnnEnn,S00E00",
+    "Year,(0000)"
+]
