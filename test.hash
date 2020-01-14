@@ -29,8 +29,37 @@ mappings:
 # if there's a comma, first string is for symbol, second is to hash
 #
 keywords = [
+    "Basename",
+    "DateRecorded",
     "Destination",
+    "DestSeries",
+    "Episode",
+    "Extension",
+    "FirstAired",
+    "Path",
+    "Season",
+    "SeasonFolder",
+    "Series",
+    "Source",
     "Template",
-    "SnnEnn,S00E00",
+    "Title",
+    "Execute",
+    "Stdin",
+    "NullTermination",
+
+    "SnnEnn,S00E00",            // SnnEnn
+    "SyyyyEnn,S0000E00",        // SyyyyEnn
+    "SnnEn,S00E0",              // SnnEn
+    "SnEnn,S0E00",              // SnEnn
+    "SnEn,S0E0",                // SnEn
+    "Ennn,E000",                // Ennn
+    "Ennnn,E0000",              // Ennnn
+    "nXnn,0x00",                // nXnn
+    "nnXnn,00x00",              // nnXnn
+    "Date,0000-00-00",          // yyyy-mm-dd
+    "DateTime,0000-00-00-0000", // yyyy-mm-dd-hhmm
+    "TwoDigits,00",             // nn
+    "FourDigits,0000",          // nnnn
+    "SixDigits,000000",         // nnnnnn
     "Year,(0000)"
 ]
