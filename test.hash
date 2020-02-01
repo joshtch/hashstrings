@@ -4,7 +4,8 @@
 #
 # prepended to all created symbol names
 #
-prefix = "kHash"
+prefix = "Prefix"
+inverseKeywordMap
 
 # the character mapping array
 # array starts out mapping one-to-one, i.e. input = output
