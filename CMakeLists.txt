@@ -13,4 +13,5 @@ add_executable( hashstrings
 target_link_libraries( hashstrings m config )
 
 set( CMAKE_INSTALL_PREFIX /usr )
-install( TARGETS hashstrings )
+install( TARGETS hashstrings
+         RUNTIME DESTINATION /usr/bin )
