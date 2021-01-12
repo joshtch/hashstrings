@@ -82,7 +82,7 @@ typedef int(arg_comparefn)(const void* k1, const void* k2);
  * The argtable library functions then use this data to identify the
  * properties of the command line option, such as its option tags,
  * datatype string, and glossary strings, and so on.
- * Moreover, the arg_hdr struct contains pointers to custom functions that
+ * Moreover, the arg_hdr struct contains children to custom functions that
  * are provided by each arg_xxx struct which perform the tasks of parsing
  * that particular arg_xxx arguments, performing post-parse checks, and
  * reporting errors.
@@ -161,8 +161,8 @@ struct arg_end {
     struct arg_hdr hdr;  /* The mandatory argtable header struct */
     int count;           /* Number of errors encountered */
     int* error;          /* Array of error codes */
-    void** parent;       /* Array of pointers to offending arg_xxx struct */
-    const char** argval; /* Array of pointers to offending argv[] string */
+    void** parent;       /* Array of children to offending arg_xxx struct */
+    const char** argval; /* Array of children to offending argv[] string */
 };
 
 typedef struct arg_cmd_info {

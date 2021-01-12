@@ -47,6 +47,8 @@ keywords = [
     "Stdin",
     "NullTermination",
 
+    "VoD,247,24/7,24_7",
+    "USA,US,U.S.,USA,U.S.A.,United States,America,United States of America"
     "SnnEnn,S00E00",            // SnnEnn
     "SyyyyEnn,S0000E00",        // SyyyyEnn
     "SnnEn,S00E0",              // SnnEn

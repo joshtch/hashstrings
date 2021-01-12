@@ -14,8 +14,15 @@
 #include <libconfig.h>  /* used to parse the input files */
 
 #include "argtable3.h"  /* used to parse command line options */
+#include "dict/dict.h"  /* B+ Tree support */
 
 #include "hashstrings.h" /* local definitions */
+
+typedef uint64_t tKey;
+typedef void tNode;
+typedef struct {
+    const char * name;
+} tRecord;
 
 /* global arg_xxx structs */
 static struct {
@@ -40,7 +47,10 @@ typedef struct tSymbolEntry {
 tSymbolEntry gSymbolMap[256];
 unsigned int        nextFreeSymbol = 0;
 const unsigned int  kSymbolOffset  = 256;
-const unsigned long kFieldMask     = 0b0111111111;
+const unsigned long kFieldMask     = 0x01FF; // mask for the 9 lsb
+
+/* B+ Tree root bptNode */
+tNode * root;
 
 /*
  * lookup byte values (0-255), encoded as 7 x 9 bit fields per uint64
@@ -66,12 +76,12 @@ const char * kHeaderPrefix =
     "\n";
 
 const char * kInverseMapPrefix =
-                   "typedef struct {\n"
-                   "    unsigned long key;\n"
-                   "    const char *  label;\n"
-                   "} t%sHashMap;\n"
-                   "\n"
-                   "t%sHashMap %sHashLookup[] = {\n";
+    "typedef struct {\n"
+    "    unsigned long key;\n"
+    "    const char *  label;\n"
+    "} t%sHashMap;\n"
+    "\n"
+    "t%sHashMap %sHashLookup[] = {\n";
 
 const char * kHeaderSuffix =
     "#endif\n"
@@ -88,7 +98,7 @@ const char * kGetFunction =
 
 static inline unsigned short getWord( const unsigned char c)
 {
-   return ( (gCharMap[ c/7 ] >> ((c % 7) * 9)) & 0b0111111111L );
+   return ( (gCharMap[ c/7 ] >> ((c % 7) * 9)) & kFieldMask );
 }
 
 /*****************************************/
@@ -105,7 +115,7 @@ const char * kSetFunction =
 static inline void setWord( const unsigned char c, const unsigned short word )
 {
     unsigned short shft = (c % 7) * 9;
-    gCharMap[ c/7 ] = (gCharMap[ c/7 ] & ~(0b0111111111L << shft)) | ((word & 0b0111111111L) << shft);
+    gCharMap[ c/7 ] = (gCharMap[ c/7 ] & ~(kFieldMask << shft)) | ((word & kFieldMask) << shft);
 }
 
 /*****************************************/
@@ -308,6 +318,18 @@ int processMapping( config_t * config )
     return result;
 }
 
+void printNode( FILE * out, unsigned int depth, tKey key, tNode * node )
+{
+    fprintf( out, "%*c N: 0x%016lx %p\n",
+             depth*2, ' ', key, (void *)node );
+}
+
+void printLeaf( FILE * out, unsigned int depth, tKey key, tRecord * record )
+{
+    fprintf( out, "%*c L: 0x%016lx %p\n",
+             depth * 2, ' ', key, (void *)record );
+}
+
 int processKeywords( config_t * config )
 {
 	int result = 0;
@@ -321,9 +343,8 @@ int processKeywords( config_t * config )
 		{
 			int i = 0;
 			const char * keyword;
-			const char * hashword;
 			char buffer[100];
-			int keywordCount = keywords->value.list->length;
+			// int keywordCount = keywords->value.list->length;
 
 			fprintf( gOutputFile, "\ntypedef enum {\n" );
 			while ((element = config_setting_get_elem( keywords, i )) != NULL)
@@ -343,17 +364,38 @@ int processKeywords( config_t * config )
 							--cnt;
 						}
 						*dest = '\0';
-						hashword = (*src == ',') ? ++src : keyword;
 
-						unsigned long hash = 0;
-						src = hashword;
-						while (*src != '\0' )
-						{
-							hash = hashChar( hash, *src );
-							src++;
-						}
-						fprintf( gOutputFile, "    k%s%-14s = 0x%016lx%c    /* %s */\n",
-								gPrefix, buffer, hash, (i+1 < keywordCount)? ',' : ' ', hashword );
+                        /* if there's a comma, hash the remainder
+                         * instead of the keyword itself */
+                        if ( *src == ',' )
+                            { ++src; }
+                        else
+                            { src = buffer; }
+
+                        unsigned long hash;
+                        while ( *src != '\0' )
+                        {
+                            hash = 0;
+                            while ( *src != '\0' && *src != ',' )
+                            {
+                                hash = hashChar( hash, *src );
+                                src++;
+                            }
+
+                            /* insert into B+Tree */
+//                            root = bptInsert( root, hash, (tRecord *) strdup(buffer) );
+
+                            fprintf( stderr, "entry: 0x%016lx, \"%s\"\n",
+                                     hash, buffer );
+
+                            if ( *src != '\0' )
+                            { ++src; }
+                        }
+
+#if 0
+                        fprintf( gOutputFile, "    k%s%-16s = 0x%016lx%c    /* %s */\n",
+                                 gPrefix, buffer, hash, (i+1 < keywordCount)? ',' : ' ', hashedword );
+#endif
 					}
 				}
 				else
@@ -365,6 +407,8 @@ int processKeywords( config_t * config )
 				i++;
 			}
 			fprintf( gOutputFile, "} t%sKeyword;\n\n", gPrefix );
+
+//            bptForEachNode( stderr, root, 0, printNode, printLeaf );
 		}
 		else
 		{

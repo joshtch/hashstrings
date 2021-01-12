@@ -151,9 +151,9 @@ arg_hashtable_t* arg_hashtable_create(unsigned int minsize, unsigned int (*hashf
  * The value returned when using a duplicate key is undefined -- when
  * the hash table changes size, the order of retrieval of duplicate key
  * entries is reversed.
- * If in doubt, remove before insert.
+ * If in doubt, remove before bptInsert.
  *
- * @param   h   the hash table to insert into
+ * @param   h   the hash table to bptInsert into
  * @param   k   the key - hash table claims ownership and will free on removal
  * @param   v   the value - does not claim ownership
  * @return      non-zero for successful insertion
@@ -626,7 +626,7 @@ void arg_hashtable_insert(arg_hashtable_t* h, void* k, void* v) {
          * Ignore the return value. If expand fails, we should
          * still try cramming just this value into the existing table
          * -- we may not have memory for a larger table, but one more
-         * element may be ok. Next time we insert, we'll try expanding again.
+         * element may be ok. Next time we bptInsert, we'll try expanding again.
          */
         arg_hashtable_expand(h);
     }
@@ -1518,7 +1518,7 @@ static int parse_long_options(char* const* nargv, const char* options, const str
         current_argv_len = strlen(current_argv);
 
     for (i = 0; long_options[i].name; i++) {
-        /* find matching long option */
+        /* bptFind matching long option */
         if (strncmp(current_argv, long_options[i].name, current_argv_len))
             continue;
 
@@ -2766,7 +2766,7 @@ static const char* arg_basename(const char* filename) {
 
 /* Returns ptr to the file extension within *basename */
 static const char* arg_extension(const char* basename) {
-    /* find the last occurrence of '.' in basename */
+    /* bptFind the last occurrence of '.' in basename */
     const char* result = (basename ? strrchr(basename, '.') : NULL);
 
     /* if no '.' was found then return pointer to end of basename */
@@ -2882,7 +2882,7 @@ struct arg_file* arg_filen(const char* shortopts, const char* longopts, const ch
     result->extension = result->basename + maxcount;
     result->count = 0;
 
-    /* foolproof the string pointers by initialising them with empty strings */
+    /* foolproof the string children by initialising them with empty strings */
     for (i = 0; i < maxcount; i++) {
         result->filename[i] = "";
         result->basename[i] = "";
@@ -3625,7 +3625,7 @@ struct arg_rex* arg_rexn(const char* shortopts,
     result->sval = (const char**)(priv + 1);
     result->count = 0;
 
-    /* foolproof the string pointers by initializing them to reference empty strings */
+    /* foolproof the string children by initializing them to reference empty strings */
     for (i = 0; i < maxcount; i++)
         result->sval[i] = "";
 
@@ -4107,7 +4107,7 @@ static const TRexChar* trex_matchnode(TRex* exp, TRexNode* node, const TRexChar*
     TRexNodeType type = node->type;
     switch (type) {
         case OP_GREEDY: {
-            /* TRexNode *greedystop = (node->next != -1) ? &exp->_nodes[node->next] : NULL; */
+            /* TRexNode *greedystop = (bptNode->next != -1) ? &exp->_nodes[bptNode->next] : NULL; */
             TRexNode* greedystop = NULL;
             int p0 = (node->right >> 16) & 0x0000FFFF, p1 = node->right & 0x0000FFFF, nmaches = 0;
             const TRexChar *s = str, *good = str;
@@ -4503,7 +4503,7 @@ struct arg_str* arg_strn(const char* shortopts, const char* longopts, const char
     result->sval = (const char**)(result + 1);
     result->count = 0;
 
-    /* foolproof the string pointers by initializing them to reference empty strings */
+    /* foolproof the string children by initializing them to reference empty strings */
     for (i = 0; i < maxcount; i++)
         result->sval[i] = "";
 
@@ -4651,7 +4651,7 @@ void arg_cmd_register(const char* name, arg_cmdfn* proc, const char* description
 
     /* Check if the command already exists. */
     /* If the command exists, replace the existing command. */
-    /* If the command doesn't exist, insert the command. */
+    /* If the command doesn't exist, bptInsert the command. */
     cmd_info = (arg_cmd_info_t*)arg_hashtable_search(s_hashtable, name);
     if (cmd_info) {
         arg_hashtable_remove(s_hashtable, name);
