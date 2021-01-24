@@ -4,25 +4,31 @@
 
 #include <stdlib.h>
 #include <stdio.h>
-#include <inttypes.h>
 #include <stdarg.h>
 #include <string.h>
 #include <ctype.h>
-#include <math.h>
 #include <errno.h>
 
-#include <libconfig.h>  /* used to parse the input files */
+#include <libconfig.h>      /* used to parse the input files */
 
-#include "argtable3.h"  /* used to parse command line options */
-#include "dict/dict.h"  /* B+ Tree support */
+#include "argtable3.h"      /* used to parse command line options */
+#include "btree/btree.h"    /* B+ Tree support */
 
-#include "hashstrings.h" /* local definitions */
+#include "libhashstrings.h"
 
-typedef uint64_t tKey;
-typedef void tNode;
+
 typedef struct {
-    const char * name;
-} tRecord;
+    const char * executableName;
+    const char * prefix;
+    FILE *       outputFile;
+
+    unsigned int arrayCount;
+    unsigned int arrayIndex;
+    tRecord **   array;
+    tRecord **   skipTable;
+} tGlobals;
+
+tGlobals globals;
 
 /* global arg_xxx structs */
 static struct {
@@ -33,12 +39,6 @@ static struct {
     struct arg_end  * end;
 } gOption;
 
-const char * gExecutableName;
-const char * gPrefix;
-FILE       * gOutputFile;
-
-const int kHashFactor = 43;
-
 typedef struct tSymbolEntry {
 	const char *    name;
 	const char *    mapsTo;
@@ -47,7 +47,6 @@ typedef struct tSymbolEntry {
 tSymbolEntry gSymbolMap[256];
 unsigned int        nextFreeSymbol = 0;
 const unsigned int  kSymbolOffset  = 256;
-const unsigned long kFieldMask     = 0x01FF; // mask for the 9 lsb
 
 /* B+ Tree root bptNode */
 tNode * root;
@@ -55,11 +54,10 @@ tNode * root;
 /*
  * lookup byte values (0-255), encoded as 7 x 9 bit fields per uint64
  * -------- ________ -------- ________ -------- ________ -------- ________
- * .ggggggg ggFFFFFF FFFeeeee eeeeDDDD DDDDDccc ccccccBB BBBBBBBa aaaaaaaa  7 fields of 9 bits each, total of 63 bits used
+ * .ggggggg ggFFFFFF FFFeeeee eeeeDDDD DDDDDccc ccccccBB BBBBBBBa aaaaaaaa
  */
 
-uint64_t gCharMap[ (256 / (64 / 9)) + 1 ];
-
+tCharMap gCharMap[ (256 / (64 / 9)) + 1 ];
 
 const char * kHeaderPrefix =
     "/*\n"
@@ -72,64 +70,31 @@ const char * kHeaderPrefix =
     "#ifndef Once_%08x\n"
     "#define Once_%08x\n"
     "\n"
-    "#include <inttypes.h>\n"
+    "#include <libhashstrings.h>\n"
     "\n";
 
+const char * kHashEnumSuffix =
+        "    k%sMaxIndex = %d\n"
+        "} t%sIndex;\n"
+        "\n";
+
+const char * kHashMapPrefix =
+        "typedef struct {\n"
+        "    tHash hash;\n"
+        "    t%sIndex index;\n"
+        "    unsigned short left, right;\n"
+        "} tMap%sHash;\n"
+        "\n"
+        "tMap%sHash map%sHash[] = {\n";
+
 const char * kInverseMapPrefix =
-    "typedef struct {\n"
-    "    unsigned long key;\n"
-    "    const char *  label;\n"
-    "} t%sHashMap;\n"
-    "\n"
-    "t%sHashMap %sHashLookup[] = {\n";
+    "const char * lookup%sAsString[] =\n"
+    "{\n";
 
 const char * kHeaderSuffix =
     "#endif\n"
     "\n"
     "/* end of automatically-generated file */\n";
-
-/*****************************************/
-
-const char * kGetFunction =
-    "static inline unsigned short get%sWord( const unsigned char c)\n"
-    "{\n"
-    "    return ( ( g%sCharMap[ c/7 ] >> ((c % 7) * 9)) & 0b0111111111L);\n"
-    "}\n\n";
-
-static inline unsigned short getWord( const unsigned char c)
-{
-   return ( (gCharMap[ c/7 ] >> ((c % 7) * 9)) & kFieldMask );
-}
-
-/*****************************************/
-
-/*
-const char * kSetFunction =
-    "static inline void set%sWord( const unsigned char c, unsigned short word )\n"
-    "{\n"
-    "    unsigned short shft = (c % 7) * 9;\n"
-    "    g%sCharMap[ c/7 ] = (g%sCharMap[ c/7 ] & ~(0b0111111111L << shft)) | ((word & 0b0111111111L) << shft);\n"
-    "}\n\n";
-*/
-
-static inline void setWord( const unsigned char c, const unsigned short word )
-{
-    unsigned short shft = (c % 7) * 9;
-    gCharMap[ c/7 ] = (gCharMap[ c/7 ] & ~(kFieldMask << shft)) | ((word & kFieldMask) << shft);
-}
-
-/*****************************************/
-
-const char * kHashFunction =
-    "static inline unsigned long f%sHashChar( unsigned long hash, const unsigned char c )\n"
-    "{\n"
-    "    return ( hash ^ ((hash * %d) + get%sWord( c ) ));\n"
-    "}\n\n";
-
-static inline unsigned long hashChar( unsigned long hash, const unsigned char c )
-{
-	return ( hash ^ ((hash * kHashFactor) + getWord( c ) ));
-}
 
 /*****************************************/
 
@@ -140,18 +105,17 @@ void printError( const char * format, ... )
 
     va_start(args, format);
     vsnprintf (buffer, sizeof(buffer), format, args);
-    fprintf( stderr, "### %s: %s\n", gExecutableName, buffer );
+    fprintf( stderr, "### %s: %s\n", globals.executableName, buffer );
     va_end(args);
 }
 
 int printParseError( const char *description, const char *filename, int lineNumber)
 {
     int result = -1;
-    FILE *stream;
 
     if ( filename != NULL )
     {
-        stream = fopen( filename, "r" );
+        FILE * stream = fopen( filename, "r" );
         if (stream != NULL)
         {
             char line[1024];
@@ -162,7 +126,8 @@ int printParseError( const char *description, const char *filename, int lineNumb
             } while ( i++ < lineNumber && !feof( stream ) );
 
             line[ strcspn( line, "\r\n" ) ] = '\0';
-            printError( "%s in %s at line %d: \"%s\"\n", description, filename, lineNumber, line);
+            printError( "%s in %s at line %d: \"%s\"\n",
+                        description, filename, lineNumber, line);
 
             fclose( stream );
 
@@ -174,14 +139,14 @@ int printParseError( const char *description, const char *filename, int lineNumb
 
 void printMap( void )
 {
-	fprintf( gOutputFile, "uint64_t g%sCharMap[] = {\n", gPrefix );
+	fprintf( globals.outputFile, "uint64_t g%sCharMap[] = {\n", globals.prefix );
 	for ( int i = 0; i < ((256/(64/9)) + 1); i++ )
     {
-        fprintf( gOutputFile, "    0x%016lx%c    /*", gCharMap[i], (i < (256/(64/9)))? ',' : ' ' );
+        fprintf( globals.outputFile, "    0x%016lx%c    /*", gCharMap[i], (i < (256/(64/9)))? ',' : ' ' );
 
         for (unsigned int shft = 0; shft < (64 - 9); shft += 9 )
         {
-            unsigned int c = (gCharMap[i] >> shft) & kFieldMask;
+            unsigned int c = (gCharMap[i] >> shft) & 0x01ffL;
             if ( c < kSymbolOffset)
             {
                 if ( isgraph( c ) )
@@ -189,44 +154,43 @@ void printMap( void )
                     switch ( c )
                     {
                     case '\'':
-                        fprintf( gOutputFile, " \'\\\'\'" );
+                        fprintf( globals.outputFile, " \'\\\'\'" );
                         break;
 
                     case '\\':
-                        fprintf( gOutputFile, " \'\\\\\'" );
+                        fprintf( globals.outputFile, " \'\\\'" );
                         break;
 
                     default:
-                        fprintf( gOutputFile, " \'%c\' ", c );
+                        fprintf( globals.outputFile, " \'%c\' ", c );
                         break;
                     }
                 }
                 else
                 {
-                    fprintf( gOutputFile, " 0x%02X", c );
+                    fprintf( globals.outputFile, " 0x%02X", c );
                 }
             }
             else
             {
-                fprintf( gOutputFile, " (%s)", gSymbolMap[c - kSymbolOffset].name );
+                fprintf( globals.outputFile, " (%s)", gSymbolMap[c - kSymbolOffset].name );
             }
         }
-        fprintf( gOutputFile, " */\n" );
+        fprintf( globals.outputFile, " */\n" );
     }
-    fprintf( gOutputFile, "};\n\n" );
+    fprintf( globals.outputFile, "};\n\n" );
 }
 
 int processMapping( config_t * config )
 {
 	int result = 0;
     config_setting_t * mapping;
-    config_setting_t * element;
 
     /* start by mapping input to output,/
      * one-to-one */
     for ( unsigned int i = 0; i < 256; i++ )
     {
-        setWord( i, i );
+        setCharMap( gCharMap, i, i );
     }
 
     mapping = config_lookup( config, "mappings" );
@@ -234,6 +198,7 @@ int processMapping( config_t * config )
     {
         if ( config_setting_is_group( mapping ) )
         {
+            config_setting_t * element;
             unsigned int i = 0;
             unsigned int j;
             int ignoreCase;
@@ -252,7 +217,7 @@ int processMapping( config_t * config )
 		                {
 			                for ( j = 'A'; j <= 'Z'; j++ )
 			                {
-				                setWord( j, tolower(j) );
+                                setCharMap( gCharMap, j, tolower( j ));
 			                }
 		                }
 	                }
@@ -261,7 +226,6 @@ int processMapping( config_t * config )
                 case CONFIG_TYPE_STRING:
                     {
                         unsigned char c;
-                        unsigned char next;
                         j = 0;
 
                         gSymbolMap[ nextFreeSymbol ].name   = name;
@@ -269,9 +233,9 @@ int processMapping( config_t * config )
 
                         while ( (c = gSymbolMap[ nextFreeSymbol ].mapsTo[ j++ ]) != '\0' )
                         {
-                            next = gSymbolMap[ nextFreeSymbol ].mapsTo[ j ];
+                            unsigned char next = gSymbolMap[ nextFreeSymbol ].mapsTo[ j ];
 
-                            setWord( c, kSymbolOffset + nextFreeSymbol );
+                            setCharMap( gCharMap, c, kSymbolOffset + nextFreeSymbol );
 
                             /* check for a range - a dash bracketed by two characters */
                             if ( c == '-' && j > 1 && next != '\0' )
@@ -280,7 +244,7 @@ int processMapping( config_t * config )
                                  * then mark the run of characters between start and end (inclusive) */
                                 while ( c <= next )
                                 {
-                                    setWord( c, kSymbolOffset + nextFreeSymbol );
+                                    setCharMap( gCharMap, c, kSymbolOffset + nextFreeSymbol );
                                     c++;
                                 }
                             }
@@ -298,13 +262,14 @@ int processMapping( config_t * config )
                 i++;
             }
 
-			fprintf( gOutputFile, "\ntypedef enum {\n" );
+			fprintf( globals.outputFile, "\ntypedef enum {\n" );
 			for ( i = 0; i < nextFreeSymbol; i++ )
 			{
-				fprintf( gOutputFile, "    k%s%-16s = %d%c\n",
-                         gPrefix, gSymbolMap[ i ].name, kSymbolOffset + i, (i < (nextFreeSymbol - 1))? ',' : ' ' );
+				fprintf( globals.outputFile, "    k%s%-16s = %u,\n",
+                         globals.prefix, gSymbolMap[ i ].name, kSymbolOffset + i );
 			}
-	        fprintf( gOutputFile, "} t%sMapping;\n\n", gPrefix );
+	        fprintf( globals.outputFile, "    k%sMax\n} t%sMapping;\n\n",
+                     globals.prefix, globals.prefix );
 
 			printMap();
         }
@@ -318,35 +283,87 @@ int processMapping( config_t * config )
     return result;
 }
 
-void printNode( FILE * out, unsigned int depth, tKey key, tNode * node )
+int compareRecords( const void * a, const void * b, void * udata )
 {
-    fprintf( out, "%*c N: 0x%016lx %p\n",
-             depth*2, ' ', key, (void *)node );
+    int   result;
+    const tRecord * recordA = a;
+    const tRecord * recordB = b;
+    (void) udata;
+
+    result = recordA->hash < recordB->hash? -1 : (recordA->hash > recordB->hash);
+
+    return result;
 }
 
-void printLeaf( FILE * out, unsigned int depth, tKey key, tRecord * record )
+bool storeRecord( const void * a, void * udata )
 {
-    fprintf( out, "%*c L: 0x%016lx %p\n",
-             depth * 2, ' ', key, (void *)record );
+    tGlobals * g      = udata;
+
+    if ( g->arrayIndex < g->arrayCount )
+    {
+        g->array[ g->arrayIndex++ ] = (tRecord *) a;
+    }
+    return true;
 }
+
+void fillTable( unsigned int level,
+                char hand,
+                unsigned int offset,
+                unsigned int length )
+{
+    unsigned int split = (length) / 2;
+
+    globals.array[offset + split]->level = level;
+    globals.array[offset + split]->hand  = hand;
+
+    globals.skipTable[ globals.arrayIndex ] = globals.array[ offset + split ];
+    globals.arrayIndex++;
+
+    unsigned int lenL = split;
+    if ( lenL > 0 )
+    {
+        globals.array[split + offset]->lower = globals.arrayIndex;
+        fillTable( level + 1, 'l', offset, lenL );
+    }
+    else {
+        globals.array[split + offset]->lower = 0;
+    }
+
+    unsigned int lenR = length - (split + 1);
+    if ( lenR > 0 )
+    {
+        globals.array[split + offset]->higher = globals.arrayIndex;
+        fillTable( level + 1, 'r', offset + split + 1, lenR );
+    }
+    else {
+        globals.array[split + offset]->higher = 0;
+    }
+}
+
 
 int processKeywords( config_t * config )
 {
 	int result = 0;
 	config_setting_t * keywords;
-	config_setting_t * element;
 
 	keywords = config_lookup(config, "keywords");
 	if (keywords != NULL)
 	{
 		if ( config_setting_is_array( keywords ) )
 		{
-			int i = 0;
-			const char * keyword;
+            config_setting_t * element;
+            const char * keyword;
+            unsigned int i = 0;
 			char buffer[100];
-			// int keywordCount = keywords->value.list->length;
 
-			fprintf( gOutputFile, "\ntypedef enum {\n" );
+            struct btree * tree;
+            tRecord        record;
+
+            /* create a b-tree */
+            tree = btree_new( sizeof( tRecord ), 0,
+                              compareRecords, &globals );
+
+            fprintf( globals.outputFile, "\ntypedef enum {\n" );
 			while ((element = config_setting_get_elem( keywords, i )) != NULL)
 			{
 				if ( config_setting_type( element ) == CONFIG_TYPE_STRING )
@@ -365,37 +382,37 @@ int processKeywords( config_t * config )
 						}
 						*dest = '\0';
 
+                        fprintf( globals.outputFile,
+                                 "    k%s%-16s = %u,\n",
+                                 globals.prefix, buffer, i );
+
                         /* if there's a comma, hash the remainder
-                         * instead of the keyword itself */
+                         * instead of hashing the keyword itself */
                         if ( *src == ',' )
                             { ++src; }
                         else
                             { src = buffer; }
 
-                        unsigned long hash;
                         while ( *src != '\0' )
                         {
-                            hash = 0;
+                            tHash hash = 0;
+                            const char * hashedString = src;
                             while ( *src != '\0' && *src != ',' )
                             {
-                                hash = hashChar( hash, *src );
+                                hash = hashChar( hash, remapChar( gCharMap, *src ) );
                                 src++;
                             }
 
                             /* insert into B+Tree */
-//                            root = bptInsert( root, hash, (tRecord *) strdup(buffer) );
-
-                            fprintf( stderr, "entry: 0x%016lx, \"%s\"\n",
-                                     hash, buffer );
+                            record.hash = hash;
+                            record.hashedString = strndup( hashedString,
+                                                           src - hashedString );
+                            record.name = strdup( buffer );
+                            btree_set( tree, &record );
 
                             if ( *src != '\0' )
                             { ++src; }
                         }
-
-#if 0
-                        fprintf( gOutputFile, "    k%s%-16s = 0x%016lx%c    /* %s */\n",
-                                 gPrefix, buffer, hash, (i+1 < keywordCount)? ',' : ' ', hashedword );
-#endif
 					}
 				}
 				else
@@ -406,10 +423,58 @@ int processKeywords( config_t * config )
 				}
 				i++;
 			}
-			fprintf( gOutputFile, "} t%sKeyword;\n\n", gPrefix );
 
-//            bptForEachNode( stderr, root, 0, printNode, printLeaf );
-		}
+            fprintf( globals.outputFile, kHashEnumSuffix,
+                     globals.prefix, i, globals.prefix );
+
+
+            fprintf( globals.outputFile, kHashMapPrefix, globals.prefix,
+                     globals.prefix, globals.prefix, globals.prefix );
+
+            globals.arrayIndex = 0;
+            globals.arrayCount = btree_count( tree );
+            if ( globals.arrayCount > 0)
+            {
+                globals.array = calloc( globals.arrayCount,
+                                        sizeof( tRecord * ) );
+                if ( globals.array != NULL )
+                {
+                    btree_ascend( tree, NULL, storeRecord, &globals );
+
+                    globals.skipTable = calloc( globals.arrayCount,
+                                                sizeof( tRecord * ) );
+                    if ( globals.skipTable != NULL)
+                    {
+                        globals.arrayIndex = 0;
+                        fillTable( 0, '+', 0, globals.arrayCount );
+
+                        for ( i = 0; i < globals.arrayCount; i++ )
+                        {
+                            fprintf( globals.outputFile,
+                                     "/* %2u:%c */    { 0x%016lx, k%s%s, %u, %u },\n",
+                                     i,
+                                     globals.skipTable[i]->hand,
+                                     globals.skipTable[i]->hash,
+                                     globals.prefix,
+                                     globals.skipTable[i]->name,
+                                     globals.skipTable[i]->lower,
+                                     globals.skipTable[i]->higher );
+                        }
+
+                        /* do a quick sanity check */
+                        for ( i = 0; i < globals.arrayCount; i++ )
+                        {
+                            tHash hash = globals.array[i]->hash;
+                            tRecord * record = findHash( globals.skipTable, hash );
+                            fprintf( stderr, "0x%016lx %s\n",
+                                     hash,
+                                     record != NULL? record->name : "not found" );
+                        }
+                    }
+                }
+            }
+            fprintf( globals.outputFile, "};\n\n" );
+        }
 		else
 		{
 			printError( "\'keywords\' must be a array, in file \"%s\" at line %d",
@@ -424,7 +489,6 @@ int printInverseKeywords( config_t * config )
 {
 	int result = 0;
 	config_setting_t * keywords;
-	config_setting_t * element;
 
 	keywords = config_lookup(config, "keywords");
 	if (keywords != NULL)
@@ -432,36 +496,11 @@ int printInverseKeywords( config_t * config )
 		if ( config_setting_is_array( keywords ) )
 		{
 			const char * keyword;
-			char buffer[100];
+            config_setting_t * element;
+            char buffer[100];
 
-
-            fprintf( gOutputFile, "typedef enum {\n" );
-            for ( int i = 0; (element = config_setting_get_elem( keywords, i )) != NULL; i++ )
-            {
-                if ( config_setting_type( element ) == CONFIG_TYPE_STRING )
-                {
-                    keyword = config_setting_get_string( element );
-                    if ( keyword != NULL)
-                    {
-                        char * p = strchr(keyword, ',');
-                        if (p != NULL)
-                        {
-                            *p = '\0';
-                        }
-                        fprintf( gOutputFile, "    kIdx%s%-16s = %d,\n", gPrefix, keyword, i );
-                    }
-                }
-                else
-                {
-                    printError( "keyword must be a string, in file \"%s\" at line %d",
-                                config_setting_source_file( element ),
-                                config_setting_source_line( element ));
-                    result = -1;
-                }
-            }
-            fprintf( gOutputFile, "    kIdx%sMax\n} tIdx%s;\n\n", gPrefix, gPrefix );
-
-            fprintf( gOutputFile, kInverseMapPrefix, gPrefix, gPrefix, gPrefix );
+            fprintf( globals.outputFile, kInverseMapPrefix,
+                     globals.prefix, globals.prefix, globals.prefix );
 			for ( int i = 0;
 			      (element = config_setting_get_elem( keywords, i )) != NULL;
 			      i++ )
@@ -482,16 +521,20 @@ int printInverseKeywords( config_t * config )
 						}
 						*dest = '\0';
 
-						fprintf( gOutputFile, "    { k%s%-16s, \"%s\" },\n",
-						         gPrefix, buffer, buffer );
+						fprintf( globals.outputFile,
+                                 "    [ k%s%-16s ] = \"%s\",\n",
+						         globals.prefix, buffer, buffer );
 					}
 				}
 			}
-			fprintf( gOutputFile, "    { 0, NULL }\n};\n\n" );
+            fprintf( globals.outputFile,
+                     "    [ k%sMaxIndex ] = NULL\n};\n\n",
+                     globals.prefix);
         }
 		else
 		{
-			printError( "\'keywords\' must be a array, in file \"%s\" at line %d",
+			printError( "\'keywords\' must be a array,"
+                        " in file \"%s\" at line %d",
 			            config_setting_source_file( keywords ),
 			            config_setting_source_line( keywords ) );
 		}
@@ -504,7 +547,7 @@ int processStructure( config_t * config )
 {
 	int result;
 
-	config_lookup_string( config, "prefix", &gPrefix );
+	config_lookup_string( config, "prefix", &globals.prefix );
 
     /* first, we need to build the character mapping */
     result = processMapping( config );
@@ -519,15 +562,12 @@ int processStructure( config_t * config )
     	result = printInverseKeywords( config );
     }
 
-    fprintf( gOutputFile, kGetFunction,  gPrefix, gPrefix );
-    fprintf( gOutputFile, kHashFunction, gPrefix, kHashFactor, gPrefix );
-
     return result;
 }
 
 int processHashFile( const char *filename )
 {
-    int result = 0;
+    int result;
     struct config_t config;
 
     config_init( &config );
@@ -538,10 +578,10 @@ int processHashFile( const char *filename )
         clock_gettime( CLOCK_REALTIME, &time );
         long stamp = time.tv_sec ^ time.tv_nsec;
 
-		fprintf( gOutputFile, kHeaderPrefix,
-                 gExecutableName, filename, stamp, stamp );
+		fprintf( globals.outputFile, kHeaderPrefix,
+                 globals.executableName, filename, stamp, stamp );
 		result = processStructure( &config );
-		fprintf( gOutputFile, "%s", kHeaderSuffix );
+		fprintf( globals.outputFile, "%s", kHeaderSuffix );
 	}
     else
     {
@@ -567,21 +607,31 @@ int main( int argc, char * argv[] )
 {
     int result = 0;
 
-    gExecutableName = strrchr( argv[0], '/' );
+    globals.executableName = strrchr( argv[0], '/' );
     /* If we found a slash, increment past it.
      * If there's no slash, point at the full argv[0] */
-    if ( gExecutableName++ == NULL )
-        { gExecutableName = argv[0]; }
+    if ( globals.executableName++ == NULL )
+        { globals.executableName = argv[0]; }
 
-    gOutputFile = stdout;
+    globals.outputFile = stdout;
 
     /* the global arg_xxx structs above are initialised within the argtable */
     void * argtable[] =
     {
-        gOption.help    = arg_litn(  NULL, "help",      0, 1, "display this help (and exit)"),
-        gOption.version = arg_litn(  NULL, "version",   0, 1, "display version info (and exit)"),
-	    gOption.extn    = arg_strn(  "x",  "extension", "<extension>",  0, 1, "set the extension to use for output files"),
-        gOption.file    = arg_filen( NULL, NULL,        "<file>", 1, 999, "input files"),
+        gOption.help    = arg_litn( NULL, "help",
+                                    0, 1,
+                                    "display this help (and exit)"),
+        gOption.version = arg_litn( NULL, "version",
+                                    0, 1,
+                                    "display version info (and exit)"),
+	    gOption.extn    = arg_strn( "x",  "extension",
+                                    "<extension>",
+                                    0, 1,
+                                    "set the extension to use for output files"),
+        gOption.file    = arg_filen( NULL, NULL,
+                                     "<file>",
+                                     1, 999,
+                                     "input files"),
 
         gOption.end     = arg_end( 20 )
     };
@@ -591,7 +641,7 @@ int main( int argc, char * argv[] )
     /* special case: '--help' takes precedence over everything else */
     if ( gOption.help->count > 0 )
     {
-        fprintf( stdout, "Usage: %s", gExecutableName );
+        fprintf( stdout, "Usage: %s", globals.executableName );
         arg_print_syntax( stdout, argtable, "\n" );
         fprintf( stdout, "process hash file into a header file.\n\n" );
         arg_print_glossary( stdout, argtable, "  %-25s %s\n" );
@@ -601,13 +651,13 @@ int main( int argc, char * argv[] )
     }
     else if ( gOption.version->count > 0 )   /* ditto for '--version' */
     {
-        fprintf( stdout, "%s, version %s\n", gExecutableName, "(to do)" );
+        fprintf( stdout, "%s, version %s\n", globals.executableName, "(to do)" );
     }
     else if (nerrors > 0) 	/* If the parser returned any errors then display them and exit */
     {
         /* Display the error details contained in the arg_end struct.*/
-        arg_print_errors( stdout, gOption.end, gExecutableName );
-        fprintf( stdout, "Try '%s --help' for more information.\n", gExecutableName );
+        arg_print_errors( stdout, gOption.end, globals.executableName );
+        fprintf( stdout, "Try '%s --help' for more information.\n", globals.executableName );
         result = 1;
     }
     else
@@ -615,7 +665,7 @@ int main( int argc, char * argv[] )
         result = 0;
         int i  = 0;
 
-        gOutputFile = NULL;
+        globals.outputFile = NULL;
 
 	    const char * extension = ".h";
 	    if ( gOption.extn->count != 0 )
@@ -635,8 +685,8 @@ int main( int argc, char * argv[] )
 		        strncpy( p, extension, &output[ sizeof(output) - 1 ] - p );
 	        }
 
-	        gOutputFile = fopen( output, "w" );
-	        if ( gOutputFile == NULL)
+	        globals.outputFile = fopen( output, "w" );
+	        if ( globals.outputFile == NULL)
 	        {
 		        fprintf( stderr, "### unable to open \'%s\' (%d: %s)\n",
 		                 output, errno, strerror(errno) );
@@ -649,7 +699,7 @@ int main( int argc, char * argv[] )
 			}
             i++;
 
-			fclose( gOutputFile );
+			fclose( globals.outputFile );
         }
     }
 

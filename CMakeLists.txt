@@ -8,7 +8,8 @@ include_directories(.)
 
 add_executable( hashstrings
                 hashstrings.c   hashstrings.h
-                argtable3.c     argtable3.h )
+                argtable3.c     argtable3.h
+                btree/btree.c   btree/btree.h libhashstrings.c libhashstrings.h)
 
 target_link_libraries( hashstrings m config dict )
 
