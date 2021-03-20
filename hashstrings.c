@@ -17,19 +17,6 @@
 #include "libhashstrings.h"
 
 
-typedef struct {
-    const char * executableName;
-    const char * prefix;
-    FILE *       outputFile;
-
-    unsigned int arrayCount;
-    unsigned int arrayIndex;
-    tRecord **   array;
-    tRecord **   skipTable;
-} tGlobals;
-
-tGlobals globals;
-
 /* global arg_xxx structs */
 static struct {
 	struct arg_lit  * help;
@@ -44,12 +31,23 @@ typedef struct tSymbolEntry {
 	const char *    mapsTo;
 } tSymbolEntry;
 
-tSymbolEntry gSymbolMap[256];
+tSymbolEntry        gSymbolMap[256];
 unsigned int        nextFreeSymbol = 0;
 const unsigned int  kSymbolOffset  = 256;
 
-/* B+ Tree root bptNode */
-tNode * root;
+typedef struct {
+    tRecord **    pointer;
+    unsigned int  count;
+    unsigned int  index;
+} tArray;
+
+typedef struct {
+    const char *  executableName;
+    const char *  prefix;
+    FILE       *  outputFile;
+} tGlobals;
+
+tGlobals globals;
 
 /*
  * lookup byte values (0-255), encoded as 7 x 9 bit fields per uint64
@@ -79,13 +77,15 @@ const char * kHashEnumSuffix =
         "\n";
 
 const char * kHashMapPrefix =
+        "/* pre-computed binary search tree */\n"
         "typedef struct {\n"
-        "    tHash hash;\n"
-        "    t%sIndex index;\n"
-        "    unsigned short left, right;\n"
-        "} tMap%sHash;\n"
+        "    tHash        hash;\n"
+        "    const char * hashedString;\n"
+        "    t%sIndex     index;\n"
+        "    tIndex       lower, higher;\n"
+        "} tMap%sSearch;\n"
         "\n"
-        "tMap%sHash map%sHash[] = {\n";
+        "tMap%sSearch map%sSearch[] = {\n";
 
 const char * kInverseMapPrefix =
     "const char * lookup%sAsString[] =\n"
@@ -97,6 +97,11 @@ const char * kHeaderSuffix =
     "/* end of automatically-generated file */\n";
 
 /*****************************************/
+
+static inline int max( int a, int b)
+{
+    return (a < b) ? b : a;
+}
 
 void printError( const char * format, ... )
 {
@@ -154,7 +159,7 @@ void printMap( void )
                     switch ( c )
                     {
                     case '\'':
-                        fprintf( globals.outputFile, " \'\\\'\'" );
+                        fprintf( globals.outputFile, " \'\\'\'" );
                         break;
 
                     case '\\':
@@ -286,8 +291,8 @@ int processMapping( config_t * config )
 int compareRecords( const void * a, const void * b, void * udata )
 {
     int   result;
-    const tRecord * recordA = a;
-    const tRecord * recordB = b;
+    const tRecord *  recordA = a;
+    const tRecord *  recordB = b;
     (void) udata;
 
     result = recordA->hash < recordB->hash? -1 : (recordA->hash > recordB->hash);
@@ -297,251 +302,244 @@ int compareRecords( const void * a, const void * b, void * udata )
 
 bool storeRecord( const void * a, void * udata )
 {
-    tGlobals * g      = udata;
+    tArray * array = udata;
 
-    if ( g->arrayIndex < g->arrayCount )
+    if ( array->index < array->count )
     {
-        g->array[ g->arrayIndex++ ] = (tRecord *) a;
+        array->pointer[ array->index++ ] = (tRecord *) a;
     }
     return true;
 }
 
-void fillTable( unsigned int level,
-                char hand,
+void fillTable( unsigned int depth,
+                tRecord **   skipTable,
+                tRecord **   linear,
                 unsigned int offset,
                 unsigned int length )
 {
+static tIndex index;
     unsigned int split = (length) / 2;
 
-    globals.array[offset + split]->level = level;
-    globals.array[offset + split]->hand  = hand;
+    if ( depth == 0 ) index = 0;
 
-    globals.skipTable[ globals.arrayIndex ] = globals.array[ offset + split ];
-    globals.arrayIndex++;
+    skipTable[ index ] = linear[ offset + split ];
+    index++;
 
     unsigned int lenL = split;
     if ( lenL > 0 )
     {
-        globals.array[split + offset]->lower = globals.arrayIndex;
-        fillTable( level + 1, 'l', offset, lenL );
+        linear[split + offset]->lower = index;
+        fillTable( depth + 1, skipTable, linear, offset, lenL );
     }
     else {
-        globals.array[split + offset]->lower = 0;
+        linear[split + offset]->lower = kLeaf;
     }
 
-    unsigned int lenR = length - (split + 1);
-    if ( lenR > 0 )
+    unsigned int lenH = length - (split + 1);
+    if ( lenH > 0 )
     {
-        globals.array[split + offset]->higher = globals.arrayIndex;
-        fillTable( level + 1, 'r', offset + split + 1, lenR );
+        linear[split + offset]->higher = index;
+        fillTable( depth + 1, skipTable, linear, offset + split + 1, lenH );
     }
     else {
-        globals.array[split + offset]->higher = 0;
+        linear[split + offset]->higher = kLeaf;
     }
 }
 
 
 int processKeywords( config_t * config )
 {
-	int result = 0;
-	config_setting_t * keywords;
+    int result = 0;
+    config_setting_t * keywords;
 
-	keywords = config_lookup(config, "keywords");
-	if (keywords != NULL)
-	{
-		if ( config_setting_is_array( keywords ) )
-		{
-            config_setting_t * element;
-            const char * keyword;
-            unsigned int i = 0;
-			char buffer[100];
+    unsigned int keywordCount;
+    char ** keywordArray;
+    char ** hashedArray;
 
-            struct btree * tree;
-            tRecord        record;
+    tRecord ** skipTable;
 
-            /* create a b-tree */
-            tree = btree_new( sizeof( tRecord ), 0,
-                              compareRecords, &globals );
+    keywords = config_lookup( config, "keywords" );
+    if ( keywords == NULL || !config_setting_is_array( keywords ))
+    {
+        printError( "\'keywords\' must be a array, in file \"%s\" at line %d",
+                    config_setting_source_file( keywords ),
+                    config_setting_source_line( keywords ));
+    }
+    else
+    {
+        config_setting_t * element;
+        const char       * keyword;
+        unsigned int i = 0;
+        char         buffer[100];
 
-            fprintf( globals.outputFile, "\ntypedef enum {\n" );
-			while ((element = config_setting_get_elem( keywords, i )) != NULL)
-			{
-				if ( config_setting_type( element ) == CONFIG_TYPE_STRING )
-				{
-					keyword = config_setting_get_string( element );
-					if ( keyword != NULL )
-					{
-						const char * src = keyword;
-						char * dest = buffer;
-						int cnt = sizeof( buffer );
+        struct btree * tree;
+        tRecord record;
 
-						while ( cnt > 1 && *src != '\0' && *src != ',' )
-						{
-							*dest++ = *src++;
-							--cnt;
-						}
-						*dest = '\0';
+        keywordCount = config_setting_length( keywords );
+        keywordArray = calloc( keywordCount, sizeof( char * ) );
+        hashedArray  = calloc( keywordCount, sizeof( char * ) );
+        if ( keywordArray == NULL || hashedArray == NULL)
+        {
+            printError( "failed to allocate memory" );
+        }
+        else
+        {
+            const char * src;
+            char       * dest;
+            int          cnt;
 
-                        fprintf( globals.outputFile,
-                                 "    k%s%-16s = %u,\n",
-                                 globals.prefix, buffer, i );
-
-                        /* if there's a comma, hash the remainder
-                         * instead of hashing the keyword itself */
-                        if ( *src == ',' )
-                            { ++src; }
-                        else
-                            { src = buffer; }
-
-                        while ( *src != '\0' )
+            for ( i = 0; i < keywordCount; i++ )
+            {
+                element = config_setting_get_elem( keywords, i );
+                if ( element != NULL)
+                {
+                    if ( config_setting_type( element ) != CONFIG_TYPE_STRING )
+                    {
+                        printError( "keyword must be a string, in file \"%s\" at line %d",
+                                    config_setting_source_file( element ),
+                                    config_setting_source_line( element ));
+                    }
+                    else
+                    {
+                        keyword = config_setting_get_string( element );
+                        if ( keyword != NULL)
                         {
-                            tHash hash = 0;
-                            const char * hashedString = src;
-                            while ( *src != '\0' && *src != ',' )
-                            {
-                                hash = hashChar( hash, remapChar( gCharMap, *src ) );
-                                src++;
-                            }
+                            src   = keyword;
+                            dest  = buffer;
+                            cnt   = sizeof( buffer );
 
-                            /* insert into B+Tree */
-                            record.hash = hash;
-                            record.hashedString = strndup( hashedString,
-                                                           src - hashedString );
-                            record.name = strdup( buffer );
-                            btree_set( tree, &record );
+                            while ( cnt > 1 && *src != '\0' && *src != ',' && *src != ';' )
+                            {
+                                *dest++ = *src++;
+                                --cnt;
+                            }
+                            *dest = '\0';
+                            keywordArray[i] = strdup( buffer );
 
                             if ( *src != '\0' )
-                            { ++src; }
-                        }
-					}
-				}
-				else
-				{
-					printError( "keyword must be a string, in file \"%s\" at line %d",
-					            config_setting_source_file( element ),
-					            config_setting_source_line( element ) );
-				}
-				i++;
-			}
-
-            fprintf( globals.outputFile, kHashEnumSuffix,
-                     globals.prefix, i, globals.prefix );
-
-
-            fprintf( globals.outputFile, kHashMapPrefix, globals.prefix,
-                     globals.prefix, globals.prefix, globals.prefix );
-
-            globals.arrayIndex = 0;
-            globals.arrayCount = btree_count( tree );
-            if ( globals.arrayCount > 0)
-            {
-                globals.array = calloc( globals.arrayCount,
-                                        sizeof( tRecord * ) );
-                if ( globals.array != NULL )
-                {
-                    btree_ascend( tree, NULL, storeRecord, &globals );
-
-                    globals.skipTable = calloc( globals.arrayCount,
-                                                sizeof( tRecord * ) );
-                    if ( globals.skipTable != NULL)
-                    {
-                        globals.arrayIndex = 0;
-                        fillTable( 0, '+', 0, globals.arrayCount );
-
-                        for ( i = 0; i < globals.arrayCount; i++ )
-                        {
-                            fprintf( globals.outputFile,
-                                     "/* %2u:%c */    { 0x%016lx, k%s%s, %u, %u },\n",
-                                     i,
-                                     globals.skipTable[i]->hand,
-                                     globals.skipTable[i]->hash,
-                                     globals.prefix,
-                                     globals.skipTable[i]->name,
-                                     globals.skipTable[i]->lower,
-                                     globals.skipTable[i]->higher );
-                        }
-
-                        /* do a quick sanity check */
-                        for ( i = 0; i < globals.arrayCount; i++ )
-                        {
-                            tHash hash = globals.array[i]->hash;
-                            tRecord * record = findHash( globals.skipTable, hash );
-                            fprintf( stderr, "0x%016lx %s\n",
-                                     hash,
-                                     record != NULL? record->name : "not found" );
+                            {
+                                hashedArray[i] = strdup( ++src );
+                            }
+                            else
+                            {
+                                hashedArray[i] = keywordArray[i];
+                            }
                         }
                     }
                 }
             }
-            fprintf( globals.outputFile, "};\n\n" );
-        }
-		else
-		{
-			printError( "\'keywords\' must be a array, in file \"%s\" at line %d",
-			            config_setting_source_file( keywords ),
-			            config_setting_source_line( keywords ) );
-		}
-	}
-	return result;
-}
 
-int printInverseKeywords( config_t * config )
-{
-	int result = 0;
-	config_setting_t * keywords;
+            /* emit the enum */
+            fprintf( globals.outputFile, "\ntypedef enum {\n" );
+            for ( i = 0; i < keywordCount; i++ )
+            {
+                fprintf( globals.outputFile,
+                         "    k%s%-16s = %u,\n",
+                         globals.prefix, keywordArray[i], i );
+            }
+            fprintf( globals.outputFile, kHashEnumSuffix,
+                     globals.prefix, i, globals.prefix );
 
-	keywords = config_lookup(config, "keywords");
-	if (keywords != NULL)
-	{
-		if ( config_setting_is_array( keywords ) )
-		{
-			const char * keyword;
-            config_setting_t * element;
-            char buffer[100];
-
+            /* emit the enum -> string lookup */
             fprintf( globals.outputFile, kInverseMapPrefix,
                      globals.prefix, globals.prefix, globals.prefix );
-			for ( int i = 0;
-			      (element = config_setting_get_elem( keywords, i )) != NULL;
-			      i++ )
-			{
-				if ( config_setting_type( element ) == CONFIG_TYPE_STRING )
-				{
-					keyword = config_setting_get_string( element );
-					if ( keyword != NULL )
-					{
-						const char * src = keyword;
-						char * dest = buffer;
-						int cnt = sizeof( buffer );
-
-						while ( cnt > 1 && *src != '\0' && *src != ',' )
-						{
-							*dest++ = *src++;
-							--cnt;
-						}
-						*dest = '\0';
-
-						fprintf( globals.outputFile,
-                                 "    [ k%s%-16s ] = \"%s\",\n",
-						         globals.prefix, buffer, buffer );
-					}
-				}
-			}
+            for ( i = 0; i < keywordCount; i++ )
+            {
+                fprintf( globals.outputFile,
+                         "    [ k%s%-16s ] = \"%s\",\n",
+                         globals.prefix, keywordArray[i], keywordArray[i] );
+            }
             fprintf( globals.outputFile,
                      "    [ k%sMaxIndex ] = NULL\n};\n\n",
-                     globals.prefix);
-        }
-		else
-		{
-			printError( "\'keywords\' must be a array,"
-                        " in file \"%s\" at line %d",
-			            config_setting_source_file( keywords ),
-			            config_setting_source_line( keywords ) );
-		}
-	}
-	return result;
-}
+                     globals.prefix );
 
+            /* create a b-tree */
+            tree = btree_new( sizeof( tRecord ), 0, compareRecords, &globals );
+
+            for ( i = 0; i < keywordCount; i++ )
+            {
+                src = hashedArray[i];
+                while ( *src != '\0' )
+                {
+                    tHash hash = 0;
+                    const char * hashedString = src;
+                    while ( *src != '\0' && *src != ',' )
+                    {
+                        hash = hashChar( hash, remapChar( gCharMap, *src ));
+                        src++;
+                    }
+
+                    /* insert into B+Tree */
+                    record.hash         = hash;
+                    record.hashedString = strndup( hashedString, src - hashedString );
+                    record.index        = i;
+                    btree_set( tree, &record );
+
+                    if ( *src != '\0' )
+                    { ++src; }
+                }
+            }
+
+            tArray array;
+            array.count = btree_count( tree );
+            if ( array.count > 0 )
+            {
+                array.pointer = calloc( array.count, sizeof( tRecord * ));
+                if ( array.pointer != NULL)
+                {
+                    array.index = 0;
+                    btree_ascend( tree, NULL, storeRecord, &array );
+
+                    skipTable = calloc( array.count, sizeof( tRecord * ));
+                    if ( skipTable != NULL)
+                    {
+                        fillTable( 0, skipTable, array.pointer, 0, array.count );
+
+                        fprintf( globals.outputFile, kHashMapPrefix, globals.prefix,
+                                 globals.prefix, globals.prefix, globals.prefix );
+
+                        for ( i = 0; i < array.count; i++ )
+                        {
+                            int hashedLen = strlen( skipTable[i]->hashedString );
+                            int len = fprintf( globals.outputFile,
+                                               "/* %2u */    { 0x%016lx, \"%s\",%*c k%s%s,",
+                                               i,
+                                               skipTable[i]->hash,
+                                               skipTable[i]->hashedString,
+                                               max( 0, 16 - hashedLen ), ' ',
+                                               globals.prefix,
+                                               keywordArray[skipTable[i]->index] );
+                            fprintf( globals.outputFile,"%*c %2u, %2u },\n",
+                                     max( 0, 78 - len ), ' ',
+                                     skipTable[i]->lower,
+                                     skipTable[i]->higher );
+                        }
+
+                        fprintf( globals.outputFile, "};\n\n" );
+
+                        /* do a quick sanity check */
+                        for ( i = 0; i < array.count; i++ )
+                        {
+                            tIndex index = findHash( skipTable, array.pointer[i]->hash );
+
+                            fprintf( stderr, "0x%016lx ", array.pointer[i]->hash );
+                            if ( index < array.count )
+                            {
+                                tRecord * r = skipTable[index];
+                                fprintf( stderr, "k%s%s, \"%s\"\n",
+                                         globals.prefix, keywordArray[r->index], r->hashedString );
+                            } else {
+                                fprintf( stderr, "not found\n" );
+                            }
+                        }
+                    }
+                }
+            }
+        } /* allocation of arrays suceeded */
+    } /* keywords is a valid array */
+
+    return result;
+}
 
 int processStructure( config_t * config )
 {
@@ -556,10 +554,6 @@ int processStructure( config_t * config )
     if ( result == 0 )
     {
     	result = processKeywords( config );
-    }
-    if ( result == 0 )
-    {
-    	result = printInverseKeywords( config );
     }
 
     return result;

@@ -8,30 +8,24 @@
 #include <inttypes.h>
 
 typedef void           tNode;
-typedef unsigned short tIndex;
+typedef uint32_t       tIndex;
 typedef uint64_t       tHash;
 
 typedef uint64_t       tCharMap;
 typedef unsigned short tMappedChar;
 
-typedef struct
-{
-    tHash hash;
-    const char * hashedString;
-    const char * name;
-    tIndex lower, higher;
+#define kLeaf   0
 
-    unsigned int level;
-    char         hand;
+/* don't need name - use lookup<prefix>asString[index] instead
+ * otherwise the 'name' strings may be duplicated */
+typedef struct {
+    tHash        hash;
+    const char * hashedString;
+    tIndex       index;
+    tIndex       lower, higher;
 } tRecord;
 
 
-extern tMappedChar remapChar( tCharMap * charMap,
-                              const unsigned char c );
-
-extern void setCharMap( tCharMap * charMap,
-                        const unsigned char c,
-                        const tMappedChar mappedC );
 
 extern tMappedChar remapChar( tCharMap * charMap,
                               const unsigned char c );
@@ -39,7 +33,11 @@ extern tMappedChar remapChar( tCharMap * charMap,
 extern tHash hashChar( tHash hash,
                        const tMappedChar mappedC );
 
-extern tRecord * findHash( tRecord ** skipTable, tHash hash );
+extern tIndex findHash( tRecord ** skipTable, tHash hash );
+
+extern void setCharMap( tCharMap * charMap,
+                        const unsigned char c,
+                        const tMappedChar mappedC );
 
 
 #endif //HASHSTRINGS_LIBHASHSTRINGS_H

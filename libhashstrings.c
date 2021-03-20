@@ -31,18 +31,18 @@ tHash hashChar( tHash hash, tMappedChar mappedC )
     return (hash ^ ((hash * kHashFactor) + mappedC));
 }
 
-tRecord * findHash( tRecord ** skipTable, tHash hash )
+tIndex findHash( tRecord ** skipTable, tHash hash )
 {
     tIndex i = 0;
 
     do {
         if ( skipTable[i]->hash == hash )
         {
-            return skipTable[i];
+            return i;
         }
         else if ( skipTable[i]->hash > hash )
         { /* hash is lower */
-            if ( skipTable[i]->lower != 0 )
+            if ( skipTable[i]->lower != kLeaf )
             {
                 i = skipTable[i]->lower;
             }
@@ -50,7 +50,7 @@ tRecord * findHash( tRecord ** skipTable, tHash hash )
         }
         else
         { /* hash is higher */
-            if ( skipTable[i]->higher != 0 )
+            if ( skipTable[i]->higher != kLeaf )
             {
                 i = skipTable[i]->higher;
             }
@@ -58,5 +58,5 @@ tRecord * findHash( tRecord ** skipTable, tHash hash )
         }
     } while ( true );
 
-    return NULL;
+    return UINT32_MAX;
 }
