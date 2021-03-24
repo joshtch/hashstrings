@@ -33,11 +33,12 @@ extern tMappedChar remapChar( tCharMap * charMap,
 extern tHash hashChar( tHash hash,
                        const tMappedChar mappedC );
 
-extern tIndex findHash( tRecord ** skipTable, tHash hash );
+extern tIndex findHash( tRecord skipTable[], tHash hash );
 
 extern void setCharMap( tCharMap * charMap,
                         const unsigned char c,
                         const tMappedChar mappedC );
 
+void dumpHashMap( FILE * out, tRecord skipTable[] );
 
 #endif //HASHSTRINGS_LIBHASHSTRINGS_H

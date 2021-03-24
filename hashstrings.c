@@ -71,6 +71,11 @@ const char * kHeaderPrefix =
     "#include <libhashstrings.h>\n"
     "\n";
 
+const char * kHashEnumPrefix =
+        "\n"
+        "typedef enum {\n"
+        "    k%sUnknown = 0,\n";
+
 const char * kHashEnumSuffix =
         "    k%sMaxIndex = %d\n"
         "} t%sIndex;\n"
@@ -78,18 +83,13 @@ const char * kHashEnumSuffix =
 
 const char * kHashMapPrefix =
         "/* pre-computed binary search tree */\n"
-        "typedef struct {\n"
-        "    tHash        hash;\n"
-        "    const char * hashedString;\n"
-        "    t%sIndex     index;\n"
-        "    tIndex       lower, higher;\n"
-        "} tMap%sSearch;\n"
         "\n"
-        "tMap%sSearch map%sSearch[] = {\n";
+        "tRecord map%sSearch[] = {\n";
 
 const char * kInverseMapPrefix =
     "const char * lookup%sAsString[] =\n"
-    "{\n";
+    "{\n"
+    "    [ k%sUnknown ] = \"(unknown)\",\n";
 
 const char * kHeaderSuffix =
     "#endif\n"
@@ -312,7 +312,7 @@ bool storeRecord( const void * a, void * udata )
 }
 
 void fillTable( unsigned int depth,
-                tRecord **   skipTable,
+                tRecord *    skipTable,
                 tRecord **   linear,
                 unsigned int offset,
                 unsigned int length )
@@ -322,27 +322,27 @@ static tIndex index;
 
     if ( depth == 0 ) index = 0;
 
-    skipTable[ index ] = linear[ offset + split ];
+    tRecord * dest = &skipTable[index];
     index++;
+
+    dest->hash         = linear[offset + split]->hash;
+    dest->hashedString = linear[offset + split]->hashedString;
+    dest->index        = linear[offset + split]->index;
+    dest->lower        = kLeaf;
+    dest->higher       = kLeaf;
 
     unsigned int lenL = split;
     if ( lenL > 0 )
     {
-        linear[split + offset]->lower = index;
+        dest->lower = index;
         fillTable( depth + 1, skipTable, linear, offset, lenL );
-    }
-    else {
-        linear[split + offset]->lower = kLeaf;
     }
 
     unsigned int lenH = length - (split + 1);
     if ( lenH > 0 )
     {
-        linear[split + offset]->higher = index;
+        dest->higher = index;
         fillTable( depth + 1, skipTable, linear, offset + split + 1, lenH );
-    }
-    else {
-        linear[split + offset]->higher = kLeaf;
     }
 }
 
@@ -356,7 +356,7 @@ int processKeywords( config_t * config )
     char ** keywordArray;
     char ** hashedArray;
 
-    tRecord ** skipTable;
+    tRecord * skipTable;
 
     keywords = config_lookup( config, "keywords" );
     if ( keywords == NULL || !config_setting_is_array( keywords ))
@@ -430,19 +430,19 @@ int processKeywords( config_t * config )
             }
 
             /* emit the enum */
-            fprintf( globals.outputFile, "\ntypedef enum {\n" );
+            fprintf( globals.outputFile, kHashEnumPrefix, globals.prefix );
             for ( i = 0; i < keywordCount; i++ )
             {
                 fprintf( globals.outputFile,
                          "    k%s%-16s = %u,\n",
-                         globals.prefix, keywordArray[i], i );
+                         globals.prefix, keywordArray[i], i+1 );
             }
             fprintf( globals.outputFile, kHashEnumSuffix,
-                     globals.prefix, i, globals.prefix );
+                     globals.prefix, i+1, globals.prefix );
 
             /* emit the enum -> string lookup */
             fprintf( globals.outputFile, kInverseMapPrefix,
-                     globals.prefix, globals.prefix, globals.prefix );
+                     globals.prefix, globals.prefix );
             for ( i = 0; i < keywordCount; i++ )
             {
                 fprintf( globals.outputFile,
@@ -490,33 +490,30 @@ int processKeywords( config_t * config )
                     array.index = 0;
                     btree_ascend( tree, NULL, storeRecord, &array );
 
-                    skipTable = calloc( array.count, sizeof( tRecord * ));
+                    skipTable = (tRecord *)calloc( array.count, sizeof( tRecord ));
                     if ( skipTable != NULL)
                     {
                         fillTable( 0, skipTable, array.pointer, 0, array.count );
 
-                        fprintf( globals.outputFile, kHashMapPrefix, globals.prefix,
-                                 globals.prefix, globals.prefix, globals.prefix );
+                        fprintf( globals.outputFile, kHashMapPrefix, globals.prefix );
 
                         for ( i = 0; i < array.count; i++ )
                         {
-                            int hashedLen = strlen( skipTable[i]->hashedString );
+                            int hashedLen = strlen( skipTable[i].hashedString );
                             int len = fprintf( globals.outputFile,
-                                               "/* %2u */    { 0x%016lx, \"%s\",%*c k%s%s,",
-                                               i,
-                                               skipTable[i]->hash,
-                                               skipTable[i]->hashedString,
+                                               "    { 0x%016lx, \"%s\",%*c k%s%s,",
+                                               skipTable[i].hash,
+                                               skipTable[i].hashedString,
                                                max( 0, 16 - hashedLen ), ' ',
                                                globals.prefix,
-                                               keywordArray[skipTable[i]->index] );
+                                               keywordArray[skipTable[i].index] );
                             fprintf( globals.outputFile,"%*c %2u, %2u },\n",
                                      max( 0, 78 - len ), ' ',
-                                     skipTable[i]->lower,
-                                     skipTable[i]->higher );
+                                     skipTable[i].lower, skipTable[i].higher );
                         }
 
                         fprintf( globals.outputFile, "};\n\n" );
-
+#if 0
                         /* do a quick sanity check */
                         for ( i = 0; i < array.count; i++ )
                         {
@@ -525,17 +522,18 @@ int processKeywords( config_t * config )
                             fprintf( stderr, "0x%016lx ", array.pointer[i]->hash );
                             if ( index < array.count )
                             {
-                                tRecord * r = skipTable[index];
+                                tRecord * r = &skipTable[index];
                                 fprintf( stderr, "k%s%s, \"%s\"\n",
                                          globals.prefix, keywordArray[r->index], r->hashedString );
                             } else {
                                 fprintf( stderr, "not found\n" );
                             }
                         }
+#endif
                     }
                 }
             }
-        } /* allocation of arrays suceeded */
+        } /* allocation of arrays succeeded */
     } /* keywords is a valid array */
 
     return result;

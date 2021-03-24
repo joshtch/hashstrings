@@ -31,32 +31,45 @@ tHash hashChar( tHash hash, tMappedChar mappedC )
     return (hash ^ ((hash * kHashFactor) + mappedC));
 }
 
-tIndex findHash( tRecord ** skipTable, tHash hash )
+tIndex findHash( tRecord skipTable[], tHash hash )
 {
     tIndex i = 0;
 
     do {
-        if ( skipTable[i]->hash == hash )
-        {
-            return i;
+        // fprintf(stderr, "%02d-0x%016lx ", i, skipTable[i].hash);
+
+        if ( skipTable[i].hash == hash )
+        { // we found it, return the corresponding tIndex (1-based)
+            // fprintf( stderr, "match (%s)\n", skipTable[i].hashedString );
+            return skipTable[i].index;
         }
-        else if ( skipTable[i]->hash > hash )
-        { /* hash is lower */
-            if ( skipTable[i]->lower != kLeaf )
-            {
-                i = skipTable[i]->lower;
-            }
-            else break;
+        else if ( skipTable[i].hash > hash )
+        { /* hash is lower than this record */
+            i = skipTable[i].lower;
+            // fprintf( stderr, "lower (%u)\n", i );
         }
         else
-        { /* hash is higher */
-            if ( skipTable[i]->higher != kLeaf )
-            {
-                i = skipTable[i]->higher;
-            }
-            else break;
+        { /* hash is higher than this record */
+            i = skipTable[i].higher;
+            // fprintf( stderr, "higher (%u)\n", i );
         }
-    } while ( true );
+    } while ( i != kLeaf );
 
-    return UINT32_MAX;
+    // fprintf( stderr, "no match\n" );
+    return 0;
+}
+
+void dumpHashMap( FILE * out, tRecord skipTable[] )
+{
+    unsigned int max = 1;
+    for ( unsigned int i = 0; i < max; i++)
+    {
+        if (max < skipTable[i].higher)
+        {
+            max = skipTable[i].higher;
+        }
+        fprintf( out, "%d: 0x%016lx,\"%s\",%d,%d,%d\n",
+                 i, skipTable[i].hash, skipTable[i].hashedString,
+                 skipTable[i].index, skipTable[i].higher, skipTable[i].lower);
+    }
 }
