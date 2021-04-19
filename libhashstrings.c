@@ -31,6 +31,23 @@ tHash hashChar( tHash hash, tMappedChar mappedC )
     return (hash ^ ((hash * kHashFactor) + mappedC));
 }
 
+tHash hashString(const char * string, tCharMap * charMap )
+{
+    tHash hash = 0;
+    const unsigned char * p = (const unsigned char *)string;
+    tMappedChar c;
+
+    do {
+        c = remapChar( charMap, *p++ );
+        if ( c != '\0' && c < 256 )
+        {
+            hash = hashChar( hash, c );
+        }
+    } while ( c != '\0' );
+
+    return hash;
+}
+
 tIndex findHash( tRecord skipTable[], tHash hash )
 {
     tIndex i = 0;

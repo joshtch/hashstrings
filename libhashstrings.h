@@ -26,12 +26,13 @@ typedef struct {
 } tRecord;
 
 
-
 extern tMappedChar remapChar( tCharMap * charMap,
                               const unsigned char c );
 
 extern tHash hashChar( tHash hash,
                        const tMappedChar mappedC );
+
+extern tHash hashString(const char * string, tCharMap * charMap );
 
 extern tIndex findHash( tRecord skipTable[], tHash hash );
 

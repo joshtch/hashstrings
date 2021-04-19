@@ -89,7 +89,7 @@ const char * kHashMapPrefix =
 const char * kInverseMapPrefix =
     "const char * lookup%sAsString[] =\n"
     "{\n"
-    "    [ k%sUnknown ] = \"(unknown)\",\n";
+    "    [ k%sUnknown ] = \"Unknown\",\n";
 
 const char * kHeaderSuffix =
     "#endif\n"
