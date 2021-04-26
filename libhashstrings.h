@@ -8,8 +8,9 @@
 #include <inttypes.h>
 
 typedef void           tNode;
-typedef uint32_t       tIndex;
 typedef uint64_t       tHash;
+typedef uint32_t       tIndex;
+#define kIndexUnknown  0
 
 typedef uint64_t       tCharMap;
 typedef unsigned short tMappedChar;
