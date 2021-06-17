@@ -355,6 +355,7 @@ int processKeywords( config_t * config )
     unsigned int keywordCount;
     char ** keywordArray;
     char ** hashedArray;
+    char ** lookupArray;
 
     tRecord * skipTable;
 
@@ -368,7 +369,6 @@ int processKeywords( config_t * config )
     else
     {
         config_setting_t * element;
-        const char       * keyword;
         unsigned int i = 0;
         char         buffer[100];
 
@@ -378,7 +378,8 @@ int processKeywords( config_t * config )
         keywordCount = config_setting_length( keywords );
         keywordArray = calloc( keywordCount, sizeof( char * ) );
         hashedArray  = calloc( keywordCount, sizeof( char * ) );
-        if ( keywordArray == NULL || hashedArray == NULL)
+        lookupArray  = calloc( keywordCount, sizeof( char * ) );
+        if ( keywordArray == NULL || hashedArray == NULL || lookupArray == NULL )
         {
             printError( "failed to allocate memory" );
         }
@@ -401,7 +402,7 @@ int processKeywords( config_t * config )
                     }
                     else
                     {
-                        keyword = config_setting_get_string( element );
+                        const char * keyword = config_setting_get_string( element );
                         if ( keyword != NULL)
                         {
                             src   = keyword;
@@ -419,10 +420,22 @@ int processKeywords( config_t * config )
                             if ( *src != '\0' )
                             {
                                 hashedArray[i] = strdup( ++src );
+
+                                /* extract the first word to hash for the reverse lookup */
+                                dest = buffer;
+                                cnt   = sizeof( buffer );
+                                while ( cnt > 1 && *src != '\0' && *src != ',' && *src != ';' )
+                                {
+                                    *dest++ = *src++;
+                                    --cnt;
+                                }
+                                *dest = '\0';
+                                lookupArray[i] = strdup( buffer );
                             }
                             else
                             {
                                 hashedArray[i] = keywordArray[i];
+                                lookupArray[i] = keywordArray[i];
                             }
                         }
                     }
@@ -447,7 +460,7 @@ int processKeywords( config_t * config )
             {
                 fprintf( globals.outputFile,
                          "    [ k%s%-16s ] = \"%s\",\n",
-                         globals.prefix, keywordArray[i], keywordArray[i] );
+                         globals.prefix, keywordArray[i], lookupArray[i] );
             }
             fprintf( globals.outputFile,
                      "    [ k%sMaxIndex ] = NULL\n};\n\n",
