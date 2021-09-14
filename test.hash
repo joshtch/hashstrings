@@ -14,6 +14,8 @@ mappings:
     # make the generated hashes case-insensitive
     ignoreCase = true
 
+    # ReverseMapPrefix = "char * lookinpUp[]"
+
     # mark these characters as 'kHashSeparator'
     Separator = " ._-"
 
@@ -49,7 +51,7 @@ keywords = [
 
     "VoD,Video On Demand,VoD",
     "24x7,24x7,247,24/7,24_7",
-    "USA,United States,USA,U.S.A.,US,U.S.,America,United States of America",
+    "USA,United States,USA,U.S.A.,US,U.S.,America,United States of America;{ \"Uncle Sam\" }",
     "SnnEnn,S00E00",            // SnnEnn
     "SyyyyEnn,S0000E00",        // SyyyyEnn
     "SnnEn,S00E0",              // SnnEn

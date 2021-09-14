@@ -1,7 +1,7 @@
 //
 // Created by paul on 11/22/19.
 //
-
+#define _GNU_SOURCE
 #include <stdlib.h>
 #include <stdio.h>
 #include <stdarg.h>
@@ -27,8 +27,8 @@ static struct {
 } gOption;
 
 typedef struct tSymbolEntry {
-	const char *    name;
-	const char *    mapsTo;
+	const char * name;
+	const char * mapsTo;
 } tSymbolEntry;
 
 tSymbolEntry        gSymbolMap[256];
@@ -36,15 +36,16 @@ unsigned int        nextFreeSymbol = 0;
 const unsigned int  kSymbolOffset  = 256;
 
 typedef struct {
-    tRecord **    pointer;
+    tRecord **    record;
     unsigned int  count;
     unsigned int  index;
 } tArray;
 
 typedef struct {
-    const char *  executableName;
-    const char *  prefix;
-    FILE       *  outputFile;
+    const char * executableName;
+    const char * prefix;
+          char * reverseMapPrefix;
+          FILE * outputFile;
 } tGlobals;
 
 tGlobals globals;
@@ -71,6 +72,11 @@ const char * kHeaderPrefix =
     "#include <libhashstrings.h>\n"
     "\n";
 
+const char * kHeaderSuffix =
+    "#endif\n"
+    "\n"
+    "/* end of automatically-generated file */\n";
+
 const char * kHashEnumPrefix =
         "\n"
         "typedef enum {\n"
@@ -86,15 +92,7 @@ const char * kHashMapPrefix =
         "\n"
         "tRecord map%sSearch[] = {\n";
 
-const char * kInverseMapPrefix =
-    "const char * lookup%sAsString[] =\n"
-    "{\n"
-    "    [ k%sUnknown ] = \"Unknown\",\n";
-
-const char * kHeaderSuffix =
-    "#endif\n"
-    "\n"
-    "/* end of automatically-generated file */\n";
+const char * kReverseMapPrefix = "const char * lookup%sAsString[]";
 
 /*****************************************/
 
@@ -233,28 +231,35 @@ int processMapping( config_t * config )
                         unsigned char c;
                         j = 0;
 
-                        gSymbolMap[ nextFreeSymbol ].name   = name;
-                        gSymbolMap[ nextFreeSymbol ].mapsTo = config_setting_get_string( element );
-
-                        while ( (c = gSymbolMap[ nextFreeSymbol ].mapsTo[ j++ ]) != '\0' )
+                        if ( strcasecmp( name,"ReverseMapPrefix") == 0 )
                         {
-                            unsigned char next = gSymbolMap[ nextFreeSymbol ].mapsTo[ j ];
+                            globals.reverseMapPrefix = (char *)config_setting_get_string( element );
+                        }
+                        else
+                        {
+                            gSymbolMap[ nextFreeSymbol ].name   = name;
+                            gSymbolMap[ nextFreeSymbol ].mapsTo = config_setting_get_string( element );
 
-                            setCharMap( gCharMap, c, kSymbolOffset + nextFreeSymbol );
-
-                            /* check for a range - a dash bracketed by two characters */
-                            if ( c == '-' && j > 1 && next != '\0' )
+                            while ( (c = gSymbolMap[ nextFreeSymbol ].mapsTo[ j++ ]) != '\0' )
                             {
-                                /* If it's a dash (and it's not at the beginning or end of mapsTo),
-                                 * then mark the run of characters between start and end (inclusive) */
-                                while ( c <= next )
+                                unsigned char next = gSymbolMap[ nextFreeSymbol ].mapsTo[ j ];
+
+                                setCharMap( gCharMap, c, kSymbolOffset + nextFreeSymbol );
+
+                                /* check for a range - a dash bracketed by two characters */
+                                if ( c == '-' && j > 1 && next != '\0' )
                                 {
-                                    setCharMap( gCharMap, c, kSymbolOffset + nextFreeSymbol );
-                                    c++;
+                                    /* If it's a dash (and it's not at the beginning or end of mapsTo),
+                                     * then mark the run of characters between start and end (inclusive) */
+                                    while ( c <= next )
+                                    {
+                                        setCharMap( gCharMap, c, kSymbolOffset + nextFreeSymbol );
+                                        c++;
+                                    }
                                 }
                             }
+                            nextFreeSymbol++;
                         }
-                        nextFreeSymbol++;
                     }
                     break;
 
@@ -271,7 +276,7 @@ int processMapping( config_t * config )
 			for ( i = 0; i < nextFreeSymbol; i++ )
 			{
 				fprintf( globals.outputFile, "    k%s%-16s = %u,\n",
-                         globals.prefix, gSymbolMap[ i ].name, kSymbolOffset + i );
+                         globals.prefix, gSymbolMap[i].name, kSymbolOffset + i );
 			}
 	        fprintf( globals.outputFile, "    k%sMax\n} t%sMapping;\n\n",
                      globals.prefix, globals.prefix );
@@ -306,7 +311,7 @@ bool storeRecord( const void * a, void * udata )
 
     if ( array->index < array->count )
     {
-        array->pointer[ array->index++ ] = (tRecord *) a;
+        array->record[ array->index++ ] = (tRecord *) a;
     }
     return true;
 }
@@ -353,9 +358,11 @@ int processKeywords( config_t * config )
     config_setting_t * keywords;
 
     unsigned int keywordCount;
-    char ** keywordArray;
-    char ** hashedArray;
-    char ** lookupArray;
+    typedef struct {
+        char * keyword;
+        char * hashed;
+        char * lookup;
+    } tParsedArray;
 
     tRecord * skipTable;
 
@@ -370,24 +377,25 @@ int processKeywords( config_t * config )
     {
         config_setting_t * element;
         unsigned int i = 0;
-        char         buffer[100];
 
         struct btree * tree;
         tRecord record;
 
         keywordCount = config_setting_length( keywords );
-        keywordArray = calloc( keywordCount, sizeof( char * ) );
-        hashedArray  = calloc( keywordCount, sizeof( char * ) );
-        lookupArray  = calloc( keywordCount, sizeof( char * ) );
-        if ( keywordArray == NULL || hashedArray == NULL || lookupArray == NULL )
+
+        int nDigits = 1;
+        for ( int i = keywordCount; i > 10; i /= 10 )
+        { ++nDigits; }
+
+        tParsedArray * parsedArray = calloc( keywordCount, sizeof( tParsedArray ));
+        if ( parsedArray == NULL )
         {
             printError( "failed to allocate memory" );
         }
         else
         {
             const char * src;
-            char       * dest;
-            int          cnt;
+            const char * anchor;
 
             for ( i = 0; i < keywordCount; i++ )
             {
@@ -405,41 +413,81 @@ int processKeywords( config_t * config )
                         const char * keyword = config_setting_get_string( element );
                         if ( keyword != NULL)
                         {
-                            src   = keyword;
-                            dest  = buffer;
-                            cnt   = sizeof( buffer );
+                            src    = keyword;
+                            anchor = keyword;
+                            int commaCounter = 0;
 
-                            while ( cnt > 1 && *src != '\0' && *src != ',' && *src != ';' )
-                            {
-                                *dest++ = *src++;
-                                --cnt;
-                            }
-                            *dest = '\0';
-                            keywordArray[i] = strdup( buffer );
-
-                            if ( *src != '\0' )
-                            {
-                                hashedArray[i] = strdup( ++src );
-
-                                /* extract the first word to hash for the reverse lookup */
-                                dest = buffer;
-                                cnt   = sizeof( buffer );
-                                while ( cnt > 1 && *src != '\0' && *src != ',' && *src != ';' )
+                            do {
+                                switch ( *src )
                                 {
-                                    *dest++ = *src++;
-                                    --cnt;
+                                case ',':
+                                    if ( commaCounter == 0 )
+                                    {
+                                        /* end of initial keyword, but we have at least one more term to hash */
+                                        parsedArray[i].keyword = strndup( anchor, src - anchor );
+                                        anchor = &src[1]; /* drop anchor at the start of the hashed words */
+                                    }
+                                    else if (commaCounter == 1)
+                                    {
+                                        /* first hashed word is default for reverse lookup */
+                                        asprintf( &parsedArray[i].lookup, "\"%*s\"", (int)(src - anchor), anchor );
+                                    }
+
+                                    ++commaCounter;
+                                    break;
+
+                                    /* semicolon means end of hash list & start of explicit reverse lookup string */
+                                case ';':
+                                    if ( commaCounter == 0 )
+                                    {
+                                        /* end of initial keyword, but we have at least one more term to hash */
+                                        parsedArray[i].keyword = strndup( anchor, src - anchor );
+                                    }
+                                    parsedArray[i].hashed = strndup( anchor, src - anchor );  /* remember the list of hashed words */
+
+                                    do { ++src; } while ( isspace(*src) );
+
+                                    /* don't leak the existing reverse lookup string, if there is one */
+                                    if ( parsedArray[i].lookup != NULL)
+                                    {
+                                        free( parsedArray[i].lookup );
+                                        parsedArray[i].lookup = NULL;
+                                    }
+                                    parsedArray[i].lookup = strdup( src ); /* remember the explicit reverse lookup provided */
+                                    /* terminate the loop */
+                                    src = "";
+                                    break;
+
+                                case '\0':
+                                default:
+                                    break;
                                 }
-                                *dest = '\0';
-                                lookupArray[i] = strdup( buffer );
-                            }
-                            else
+                            } while ( *src++ != '\0');
+
+                            if ( parsedArray[i].keyword == NULL )
                             {
-                                hashedArray[i] = keywordArray[i];
-                                lookupArray[i] = keywordArray[i];
+                                parsedArray[i].keyword = strdup( anchor );
+                            }
+
+                            if ( parsedArray[i].hashed == NULL )
+                            {
+                                parsedArray[i].hashed = strdup( anchor );
+                            }
+
+                            if ( parsedArray[i].lookup == NULL )
+                            {
+                                /* if reverse lookup isn't already set to something better, use the keyword */
+                                asprintf( &parsedArray[i].lookup, "\"%s\"", anchor );
                             }
                         }
                     }
                 }
+            }
+
+            int maxKeywordLen = 0;
+            for ( i = 0; i < keywordCount; i++ )
+            {
+                maxKeywordLen = max( maxKeywordLen, strlen( parsedArray[i].keyword ) );
             }
 
             /* emit the enum */
@@ -447,31 +495,38 @@ int processKeywords( config_t * config )
             for ( i = 0; i < keywordCount; i++ )
             {
                 fprintf( globals.outputFile,
-                         "    k%s%-16s = %u,\n",
-                         globals.prefix, keywordArray[i], i+1 );
+                         "    k%s%*s = %*u,\n",
+                         globals.prefix, -maxKeywordLen, parsedArray[i].keyword, nDigits, i+1 );
             }
             fprintf( globals.outputFile, kHashEnumSuffix,
                      globals.prefix, i+1, globals.prefix );
 
             /* emit the enum -> string lookup */
-            fprintf( globals.outputFile, kInverseMapPrefix,
-                     globals.prefix, globals.prefix );
+            if ( globals.reverseMapPrefix == NULL )
+            {
+                asprintf( &globals.reverseMapPrefix, kReverseMapPrefix, globals.prefix );
+            }
+            fprintf( globals.outputFile, "%s", globals.reverseMapPrefix );
+
+            fprintf( globals.outputFile," = {\n" );
             for ( i = 0; i < keywordCount; i++ )
             {
                 fprintf( globals.outputFile,
-                         "    [ k%s%-16s ] = \"%s\",\n",
-                         globals.prefix, keywordArray[i], lookupArray[i] );
+                         "    [ k%s%*s ] = %s",
+                         globals.prefix, -maxKeywordLen, parsedArray[i].keyword, parsedArray[i].lookup );
+                if ( i < keywordCount - 1 )
+                    fputc( ',', globals.outputFile);
+                fputc( '\n', globals.outputFile);
+
             }
-            fprintf( globals.outputFile,
-                     "    [ k%sMaxIndex ] = NULL\n};\n\n",
-                     globals.prefix );
+            fprintf( globals.outputFile, "};\n\n" );
 
             /* create a b-tree */
             tree = btree_new( sizeof( tRecord ), 0, compareRecords, &globals );
 
             for ( i = 0; i < keywordCount; i++ )
             {
-                src = hashedArray[i];
+                src = parsedArray[i].hashed;
                 while ( *src != '\0' )
                 {
                     tHash hash = 0;
@@ -497,8 +552,8 @@ int processKeywords( config_t * config )
             array.count = btree_count( tree );
             if ( array.count > 0 )
             {
-                array.pointer = calloc( array.count, sizeof( tRecord * ));
-                if ( array.pointer != NULL)
+                array.record = calloc( array.count, sizeof( tRecord * ));
+                if ( array.record != NULL)
                 {
                     array.index = 0;
                     btree_ascend( tree, NULL, storeRecord, &array );
@@ -506,34 +561,42 @@ int processKeywords( config_t * config )
                     skipTable = (tRecord *)calloc( array.count, sizeof( tRecord ));
                     if ( skipTable != NULL)
                     {
-                        fillTable( 0, skipTable, array.pointer, 0, array.count );
+                        fillTable( 0, skipTable, array.record, 0, array.count );
+
+                        int maxHashedLen = 0;
+                        for ( i = 0; i < array.count; i++ )
+                        {
+                            maxHashedLen = max( maxHashedLen, strlen(skipTable[i].hashedString) );
+                        }
 
                         fprintf( globals.outputFile, kHashMapPrefix, globals.prefix );
 
                         for ( i = 0; i < array.count; i++ )
                         {
-                            int hashedLen = strlen( skipTable[i].hashedString );
-                            int len = fprintf( globals.outputFile,
-                                               "    { 0x%016lx, \"%s\",%*c k%s%s,",
-                                               skipTable[i].hash,
-                                               skipTable[i].hashedString,
-                                               max( 0, 16 - hashedLen ), ' ',
-                                               globals.prefix,
-                                               keywordArray[skipTable[i].index] );
-                            fprintf( globals.outputFile,"%*c %2u, %2u },\n",
-                                     max( 0, 78 - len ), ' ',
-                                     skipTable[i].lower, skipTable[i].higher );
+                            fprintf(
+                                globals.outputFile,
+                                "    { 0x%016lx, \"%s\",%*ck%s%s,%*c%*u, %*u }",
+                                skipTable[i].hash,
+                                skipTable[i].hashedString,
+                                (int)(strlen(skipTable[i].hashedString) - maxHashedLen - 1), ' ',
+                                globals.prefix, parsedArray[skipTable[i].index].keyword,
+                                (int)(strlen( parsedArray[skipTable[i].index].keyword ) - maxKeywordLen - 1), ' ',
+                                nDigits, skipTable[i].lower,
+                                nDigits, skipTable[i].higher );
+                            if ( i < array.count - 1 )
+                                fputc( ',', globals.outputFile);
+                            fputc( '\n', globals.outputFile);
                         }
 
                         fprintf( globals.outputFile, "};\n\n" );
 #if 0
                         /* do a quick sanity check */
-                        for ( i = 0; i < array.count; i++ )
+                        for ( i = 0; i < parsedArray.count; i++ )
                         {
-                            tIndex index = findHash( skipTable, array.pointer[i]->hash );
+                            tIndex index = findHash( skipTable, parsedArray.record[i]->hash );
 
-                            fprintf( stderr, "0x%016lx ", array.pointer[i]->hash );
-                            if ( index < array.count )
+                            fprintf( stderr, "0x%016lx ", parsedArray.record[i].hash );
+                            if ( index < parsedArray.count )
                             {
                                 tRecord * r = &skipTable[index];
                                 fprintf( stderr, "k%s%s, \"%s\"\n",
