@@ -10,7 +10,7 @@
 typedef void           tNode;
 typedef uint64_t       tHash;
 typedef uint32_t       tIndex;
-#define kIndexUnknown  0
+#define kIndexUnset	   0
 
 typedef uint64_t       tCharMap;
 typedef unsigned short tMappedChar;

@@ -115,48 +115,57 @@ static inline int max( int a, int b )
  */
 int establishDir( char * path, int permissions )
 {
-    int result = mkdir( path, permissions );
-    if ( result == -1 )
-    {
-        char * lastSlash;
+	int result = 0;
 
-        result = errno;
-        switch (errno)
-        {
-        case ENOENT:
-            lastSlash = strrchr( path, '/' );
-            if ( lastSlash != NULL)
-            {
-                *lastSlash = '\0';
-                result = establishDir( path, permissions );
-                if ( result == 0 )
-                {
-                    *lastSlash = '/';
-                    result = mkdir( path, permissions );
-                    if ( result == -1 )
-                    {
-                        result = errno;
-                    }
-                }
-            }
-            break;
+	char * lastSlash;
 
-        case EEXIST:
-            /* this 'error' is normal and expected */
-            result = 0;
-            /* just double-check that we can modify the existing directory */
-            if ( access( path, W_OK | X_OK ) == -1 )
-            {
-                result = errno;
-                fprintf( stderr, "### unable to modify directory \"%s\" (%d: %s)\n", path, errno, strerror(errno));
-            }
-            break;
+	result = mkdir( path, permissions );
+	if ( result == -1 )
+	{
+		result = errno;
+		switch ( errno )
+		{
+			/* path doesn't exist, so lop off the last element and recurse until
+			 * it does, then create the missing elements as we unwind */
+		case ENOENT:
+			lastSlash = strrchr( path, '/' );
+			if ( lastSlash != NULL) {
+				*lastSlash = '\0';
+				result = establishDir( path, permissions );
+				if ( result == 0 ) {
+					*lastSlash = '/';
+					result = mkdir( path, permissions );
+					if ( result == -1 ) {
+						result = errno;
+					}
+				}
+			}
+			break;
 
-        default:
-            fprintf( stderr, "### unable to create directory \"%s\" (%d: %s)\n", path, errno, strerror(errno));
-            break;
-        }
-    }
+		case 0: 		/* just created it successfully */
+		case EEXIST:	/* already exists - this 'error' is normal and expected */
+			/*  either one will unwind recursion */
+			result = 0;
+			/* just double-check that we can modify the existing directory */
+			if ( access( path, W_OK | X_OK ) == -1 ) {
+				result = errno;
+				fprintf( stderr,
+						 "### unable to modify directory \"%s\" (%d: %s)\n",
+						 path,
+						 errno,
+						 strerror(errno));
+			}
+			break;
+
+		default:	/* Anything else is a problem we're not expecting */
+			fprintf( stderr,
+					 "### unable to create directory \"%s\" (%d: %s)\n",
+					 path,
+					 errno,
+					 strerror(errno));
+			break;
+		}
+	}
 
     return result;
 }
@@ -588,7 +597,7 @@ int processKeywords( config_t * config )
             if ( globals.reverseUnsetEntry == NULL)
             {
                 fprintf( globals.outputFile,
-                         "    [ k%sUnset ] = \"Unknown\",\n",
+                         "    [ k%sUnset ] = \"Unset\",\n",
                          globals.prefix );
             }
             else
@@ -827,7 +836,6 @@ int main( int argc, char * argv[] )
     else
     {
         result = 0;
-        int i = 0;
 
         globals.outputFile = NULL;
 
@@ -837,25 +845,21 @@ int main( int argc, char * argv[] )
             extension = *gOption.extn->sval;
         }
 
-        while ( i < gOption.file->count && result == 0 )
+        for ( int i = 0; i < gOption.file->count && result == 0; ++i )
         {
             char output[FILENAME_MAX];
             output[ 0 ] = '\0';
 
-            const char * filename;
-            if ( gOption.output->count > 0 )
-            {
-                filename = gOption.output->filename[ 0 ];
-            }
-            else
-            {
-                filename = gOption.file->filename[ i ];
-            }
+			fprintf( stderr, " input: %s\n", gOption.file->filename[ i ] );
+            char * filename = strdup( gOption.file->filename[ i ] );
+            char * path     = dirname( filename );
+            if ( path != NULL && path[0] != '\0' && path[0] != '.' && path[0] != '/' && path[1] != '\0' )
+			{
+				result = establishDir( path, kDirPerms );
+			}
 
-            result = establishDir((char *)filename, kDirPerms);
-
-            char       * base   = strdup( gOption.file->basename[ i ] );
-            char       * period = NULL;
+            char * base   = strdup( gOption.file->basename[ i ] );
+            char * period = NULL;
             for ( char * p = base; *p != '\0'; ++p )
             {
                 switch ( *p )
@@ -868,8 +872,11 @@ int main( int argc, char * argv[] )
             }
             if ( period != NULL) *period = '\0';
 
-            snprintf( output, sizeof( output ), "%s/%s%s", filename, base, extension );
+            snprintf( output, sizeof( output ), "%s/%s%s", path, base, extension );
             fprintf( stderr, "output: %s\n", output );
+
+            free( filename );
+            free( base );
 
             globals.outputFile = fopen( output, "w" );
             if ( globals.outputFile == NULL)
@@ -883,7 +890,6 @@ int main( int argc, char * argv[] )
             {
                 result = processHashFile( gOption.file->filename[ i ] );
             }
-            i++;
 
             fclose( globals.outputFile );
         }
