@@ -6,11 +6,13 @@ set( CMAKE_C_FLAGS    "-Wall -Wextra" )
 
 include_directories(.)
 
+add_library( argtable3 argtable3.c argtable3.h )
+
 add_executable( hashstrings
         hashstrings.c  hashstrings.h
         argtable3.c    argtable3.h )
 
-target_link_libraries( hashstrings m config )
+target_link_libraries( hashstrings argtable3 m config )
 
 set( CMAKE_INSTALL_PREFIX /usr )
 install( TARGETS hashstrings
